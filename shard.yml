@@ -1,0 +1,9 @@
+name: minaudio
+version: 0.1.0
+authors:
+  - Orel Sokolov
+description: |
+  Crystal bindings for miniaudio (v0.11.22): playback engine, sounds,
+  decoders, device enumeration — a typed, idiomatic API over the C header.
+license: MIT
+crystal: ">= 1.10.0"

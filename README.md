@@ -1,0 +1,103 @@
+# minaudio.cr
+
+Crystal bindings for [miniaudio](https://miniaud.io) — single-header C
+audio playback and decoding, wrapped in a typed, idiomatic Crystal API.
+The C library is vendored (`vendor/miniaudio.h`, v0.11.22, public domain
+/ MIT-0), so nothing is installed system-wide.
+
+## What's covered
+
+| Area | API |
+|---|---|
+| Playback engine | `MinAudio::Engine` — default device, master volume, pause/resume, fire-and-forget `#play_file` |
+| Sounds | `MinAudio::Sound` — start/stop (+fade), volume, pan, pitch, loop, seek/cursor/length, fades, 3D position |
+| Groups | `MinAudio::SoundGroup` — volume/stop buses |
+| Decoding | `MinAudio::Decoder` — headless WAV/MP3/FLAC → Float32 PCM from file or memory, with optional resample/mix-down |
+| Devices | `MinAudio::Context` — playback/capture enumeration (names + opaque ids) |
+| Errors | `MinAudio::Error` carrying a `MinAudio::Result` code (full ma_result table) |
+
+Not wrapped (yet): raw custom `ma_device` playback/capture callbacks, the
+node graph, the resource-manager internals, Vorbis (miniaudio default
+off), encoders (`MA_NO_ENCODING`).
+
+## Quickstart
+
+```bash
+rake build   # compile vendor C → lib/libminaudio.a
+rake spec    # headless decoder specs
+```
+
+```crystal
+require "minaudio"
+
+engine = MinAudio::Engine.new
+engine.play_file("click.wav")                     # fire and forget
+
+music = engine.play("music.ogg", loop: true)
+music.volume = 0.6f32
+music.fade(music.volume, 0.0f32, 1500)            # fade out
+music.stop
+
+engine.stop_all
+engine.close
+```
+
+Headless decoding (no audio device needed):
+
+```crystal
+dec = MinAudio::Decoder.from_file("song.mp3")
+dec.sample_rate    # => 44100
+dec.channels       # => 2
+pcm = dec.read_all # => Bytes, interleaved Float32
+```
+
+Device enumeration:
+
+```crystal
+MinAudio::Context.names.each { |n| puts n }       # playback devices
+```
+
+## Integrating into an app
+
+1. Add the shard:
+
+   ```yaml
+   dependencies:
+     minaudio:
+       git: git@github.com:OrelSokolov/minaudio.cr.git
+   ```
+
+2. After `shards install`, build the vendored C once:
+
+   ```bash
+   (cd lib/minaudio && rake build)
+   ```
+
+3. Link with the shard's `lib/` dir, e.g.:
+
+   ```bash
+   crystal build src/app.cr --link-flags "-Llib/minaudio/lib"
+   ```
+
+Platform libraries and frameworks (CoreAudio/AudioToolbox on macOS,
+pthread/dl/m on Linux) are attached by `@[Link]` attributes in
+`src/minaudio/lib.cr` — nothing extra to declare.
+
+Windows: build the shard with the MSVC environment available (the
+Rakefile shells out to `cl.exe`, matching Crystal's windows-msvc
+binaries with `/MD`).
+
+## Layout
+
+```
+vendor/miniaudio.h   vendored miniaudio (v0.11.22)
+ext/miniaudio.c      MINIAUDIO_IMPLEMENTATION + sizeof/config helpers
+src/minaudio/lib.cr  raw FFI bindings (all structs opaque)
+src/minaudio/*.cr    Engine, Sound, SoundGroup, Decoder, Context, Result
+spec/                headless specs (decoder round-trips)
+```
+
+## License
+
+MIT (see `LICENSE`). The vendored miniaudio is public domain / MIT-0
+(see `vendor/miniaudio-LICENSE`).
