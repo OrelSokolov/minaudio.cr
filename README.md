@@ -87,6 +87,36 @@ Windows: build the shard with the MSVC environment available (the
 Rakefile shells out to `cl.exe`, matching Crystal's windows-msvc
 binaries with `/MD`).
 
+### Android
+
+miniaudio's Android backends are AAudio (default) and OpenSL ES
+(fallback); `src/minaudio/lib.cr` links both (`@[Link("aaudio")` +
+`@[Link("OpenSLES")]`) when compiled with `flag?(:android)`.
+
+```bash
+rake build:android        # → ext/miniaudio_android.o (NDK clang)
+# pass it as an extra .o to the APK link, e.g. egui.cr:
+#   tmp/android/build_apk.sh app.o sokol_shim_android.o \
+#     android_native_app_glue.o nanosvg_shim.o lib/minaudio/ext/miniaudio_android.o
+```
+
+The link line needs `-laaudio -lOpenSLES` (mirroring the @[Link]s —
+cross-compiled Crystal objects don't carry them).
+
+### iOS
+
+The iOS backend is CoreAudio; the vendored header pulls AVFoundation
+(ObjC) there, so the unit compiles as Objective-C:
+
+```bash
+rake build:ios             # both → ext/miniaudio_ios_{sim,device}.o
+TARGET=sim rake build:ios  # one of them
+```
+
+Link the matching object into the app and add the CoreAudio /
+AudioToolbox / CoreFoundation frameworks (the darwin branch of lib.cr's
+@[Link]s already names them for Crystal-side compilation).
+
 ## Layout
 
 ```

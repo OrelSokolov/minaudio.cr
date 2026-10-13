@@ -1,4 +1,5 @@
 /lib/
+ext/*.o
 /.crystal-cache/
 /doc/
 /shard.lock

@@ -26,5 +26,5 @@ require "./minaudio/decoder"
 require "./minaudio/devices"
 
 module MinAudio
-  VERSION = "0.1.0"
+  VERSION = "0.1.1"
 end

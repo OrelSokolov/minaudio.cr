@@ -12,6 +12,14 @@
   @[Link(framework: "AudioToolbox")]
   @[Link(framework: "CoreFoundation")]
 {% end %}
+{% if flag?(:android) %}
+  # miniaudio's Android backends: AAudio (API 26+, default pick) with
+  # OpenSL ES as the pre-26 fallback (egui.cr's minSdk 28 always has
+  # AAudio; OEM breakage makes the fallback worth linking anyway).
+  @[Link("aaudio")]
+  @[Link("OpenSLES")]
+  @[Link("log")]
+{% end %}
 {% if flag?(:linux) && !flag?(:android) %}
   @[Link("pthread")]
   @[Link("dl")]
