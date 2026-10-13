@@ -53,6 +53,29 @@ lib LibMinAudio
     info : Void*, out : UInt8*
   ) : Void
 
+  # Backend-pinned engine init (see ext): context created with an
+  # explicit backend list, engine attached to it. The context outlives
+  # the engine — free with context_free AFTER engine_uninit.
+  fun context_create = minaudio_context_create(
+    backends : Int32*, count : Int32, out_ctx : Void**
+  ) : Int32
+  fun context_free = minaudio_context_free(ctx : Void*) : Void
+  fun engine_init_ctx = minaudio_engine_init_ctx(ctx : Void*, engine : Void*) : Int32
+
+  # ma_backend enum (priority order; see the header's "Backend enums
+  # must be in priority order" block).
+  BACKEND_WASAPI     =  0
+  BACKEND_DSOUND     =  1
+  BACKEND_WINMM      =  2
+  BACKEND_COREAUDIO  =  3
+  BACKEND_SNDIO      =  4
+  BACKEND_AUDIO4     =  5
+  BACKEND_OSS        =  6
+  BACKEND_PULSEAUDIO =  7
+  BACKEND_ALSA       =  8
+  BACKEND_AAUDIO     =  9
+  BACKEND_OPENSL     = 10
+
   # ---- ma_engine ------------------------------------------------------
   # config is NULL for defaults (no custom config binding yet).
   fun engine_init = ma_engine_init(config : Void*, engine : Void*) : Int32

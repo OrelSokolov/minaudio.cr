@@ -15,15 +15,44 @@
 module MinAudio
   class Engine
     @buf : Bytes
+    @ctx : Pointer(Void)? # backend-pinned context (nil = default init)
     @closed : Bool = false
     @sounds = [] of Sound
     @groups = [] of SoundGroup
 
-    def initialize
+    # `backends` pins the backend list (LibMinAudio::BACKEND_* — e.g.
+    # [BACKEND_OPENSL] to bypass AAudio on a vendor build that refuses
+    # it). Nil = miniaudio's default priority order.
+    def initialize(backends : Array(Int32)? = nil)
       @buf = Bytes.new(LibMinAudio.sizeof_engine)
-      MinAudio.check(
-        LibMinAudio.engine_init(Pointer(Void).null, @buf),
-        "engine init (no playback device?)")
+      if backends
+        unless backends.empty?
+          list = backends.slice
+          ctx = Pointer(Void).null
+          MinAudio.check(
+            LibMinAudio.context_create(list.to_unsafe,
+              backends.size, pointerof(ctx)),
+            "context init (backends: #{backends.inspect})")
+          @ctx = ctx
+          begin
+            MinAudio.check(
+              LibMinAudio.engine_init_ctx(ctx, @buf),
+              "engine init (backends: #{backends.inspect})")
+          rescue ex
+            LibMinAudio.context_free(ctx)
+            @ctx = nil
+            raise ex
+          end
+        else
+          MinAudio.check(
+            LibMinAudio.engine_init(Pointer(Void).null, @buf),
+            "engine init")
+        end
+      else
+        MinAudio.check(
+          LibMinAudio.engine_init(Pointer(Void).null, @buf),
+          "engine init (no playback device?)")
+      end
     end
 
     def to_unsafe : Void*
@@ -105,11 +134,17 @@ module MinAudio
     end
 
     # Uninit every tracked sound and the engine itself. Idempotent.
+    # The pinned context (if any) is freed AFTER the engine — miniaudio
+    # keeps the pointer.
     def close : Nil
       return if @closed
       @sounds.each(&.close)
       @groups.each(&.close)
       LibMinAudio.engine_uninit(to_unsafe)
+      if (ctx = @ctx)
+        LibMinAudio.context_free(ctx)
+        @ctx = nil
+      end
       @closed = true
     end
 

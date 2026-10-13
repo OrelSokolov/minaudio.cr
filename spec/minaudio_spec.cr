@@ -35,7 +35,7 @@ end
 
 describe MinAudio do
   it "exposes the vendored version" do
-    MinAudio::VERSION.should eq("0.1.0")
+    MinAudio::VERSION.should eq("0.1.2")
   end
 
   it "maps ma_result codes" do

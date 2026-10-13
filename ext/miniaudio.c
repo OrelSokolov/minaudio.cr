@@ -53,6 +53,37 @@ ma_result minaudio_decoder_init_file_f32(const char* path, ma_uint32 channels,
     return ma_decoder_init_file(path, &cfg, dec);
 }
 
+/* ---- Backend-pinned engine init ---------------------------------------
+ * ma_engine_init(NULL) lets miniaudio pick its highest-priority backend
+ * (AAudio on Android). Some vendor builds refuse AAudio stream opens
+ * for native-activity apps; pinning the backend list (OpenSL ES is the
+ * universally reliable fallback) needs a context created here — the
+ * engine keeps the pointer, so the context is heap-allocated and freed
+ * by minaudio_context_free AFTER ma_engine_uninit.
+ */
+ma_result minaudio_context_create(const int* backends, int count,
+                                  ma_context** out) {
+    ma_backend bs[8];
+    int n = (count > 8) ? 8 : count;
+    for (int i = 0; i < n; i++) bs[i] = (ma_backend)backends[i];
+    ma_context* c = (ma_context*)malloc(sizeof(ma_context));
+    if (!c) return MA_OUT_OF_MEMORY;
+    ma_result r = ma_context_init(n > 0 ? bs : NULL, (ma_uint32)n, NULL, c);
+    if (r != MA_SUCCESS) { free(c); return r; }
+    *out = c;
+    return MA_SUCCESS;
+}
+
+void minaudio_context_free(ma_context* c) {
+    if (c) { ma_context_uninit(c); free(c); }
+}
+
+ma_result minaudio_engine_init_ctx(ma_context* ctx, ma_engine* engine) {
+    ma_engine_config cfg = ma_engine_config_init();
+    cfg.pContext = ctx;
+    return ma_engine_init(&cfg, engine);
+}
+
 /* ma_decoder_get_data_format needs five out-params; channels/rate are all
  * the Crystal API exposes (the format is f32 by construction). */
 ma_result minaudio_decoder_format(ma_decoder* dec, ma_uint32* channels,
