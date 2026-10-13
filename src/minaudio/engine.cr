@@ -27,10 +27,9 @@ module MinAudio
       @buf = Bytes.new(LibMinAudio.sizeof_engine)
       if backends
         unless backends.empty?
-          list = backends.slice
           ctx = Pointer(Void).null
           MinAudio.check(
-            LibMinAudio.context_create(list.to_unsafe,
+            LibMinAudio.context_create(backends.to_unsafe,
               backends.size, pointerof(ctx)),
             "context init (backends: #{backends.inspect})")
           @ctx = ctx
