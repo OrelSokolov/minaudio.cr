@@ -62,6 +62,25 @@ lib LibMinAudio
   fun context_free = minaudio_context_free(ctx : Void*) : Void
   fun engine_init_ctx = minaudio_engine_init_ctx(ctx : Void*, engine : Void*) : Int32
 
+  # ---- ext capture helpers (see ext/miniaudio.c) ----------------------
+  # Opaque per-device capture state: the device runs with a data callback
+  # appending s16 PCM to a locked buffer; drain is non-blocking for the
+  # UI frame thread. capture_new leaves the device STOPPED — call
+  # capture_start explicitly. Free with capture_free.
+  fun capture_new = minaudio_capture_new(
+    device_id : UInt8*, rate : Int32, channels : Int32,
+    backends : Int32*, backend_count : Int32, out_result : Int32*
+  ) : Void*
+  fun capture_start = minaudio_capture_start(cap : Void*) : Int32
+  fun capture_stop = minaudio_capture_stop(cap : Void*) : Int32
+  fun capture_drain = minaudio_capture_drain(
+    cap : Void*, out : UInt8*, cap_len : SizeT
+  ) : SizeT
+  fun capture_pending = minaudio_capture_pending(cap : Void*) : SizeT
+  fun capture_rate = minaudio_capture_rate(cap : Void*) : Int32
+  fun capture_channels = minaudio_capture_channels(cap : Void*) : Int32
+  fun capture_free = minaudio_capture_free(cap : Void*) : Void
+
   # ma_backend enum (priority order; see the header's "Backend enums
   # must be in priority order" block).
   BACKEND_WASAPI     =  0

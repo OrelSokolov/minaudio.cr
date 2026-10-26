@@ -24,6 +24,7 @@ require "./minaudio/sound"
 require "./minaudio/sound_group"
 require "./minaudio/decoder"
 require "./minaudio/devices"
+require "./minaudio/capture"
 
 module MinAudio
   VERSION = "0.1.2"

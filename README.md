@@ -14,9 +14,10 @@ The C library is vendored (`vendor/miniaudio.h`, v0.11.22, public domain
 | Groups | `MinAudio::SoundGroup` — volume/stop buses |
 | Decoding | `MinAudio::Decoder` — headless WAV/MP3/FLAC → Float32 PCM from file or memory, with optional resample/mix-down |
 | Devices | `MinAudio::Context` — playback/capture enumeration (names + opaque ids) |
+| Capture | `MinAudio::CaptureDevice` — microphone recording to s16le PCM, non-blocking `#drain` (callback + locked buffer in ext/miniaudio.c) |
 | Errors | `MinAudio::Error` carrying a `MinAudio::Result` code (full ma_result table) |
 
-Not wrapped (yet): raw custom `ma_device` playback/capture callbacks, the
+Not wrapped (yet): raw custom `ma_device` playback callbacks, the
 node graph, the resource-manager internals, Vorbis (miniaudio default
 off), encoders (`MA_NO_ENCODING`).
 
@@ -55,6 +56,18 @@ Device enumeration:
 
 ```crystal
 MinAudio::Context.names.each { |n| puts n }       # playback devices
+```
+
+Microphone capture (permission — RECORD_AUDIO on Android, TCC on macOS —
+is the application's job; without it init fails cleanly):
+
+```crystal
+mic = MinAudio::CaptureDevice.new                  # default mic, 16 kHz mono s16
+mic.start
+chunk = mic.drain                                  # Bytes of NEW PCM, never blocks
+mic.stop
+mic.close
+# a specific microphone: Context.devices[:capture][i].id → CaptureDevice.new(id)
 ```
 
 ## Integrating into an app

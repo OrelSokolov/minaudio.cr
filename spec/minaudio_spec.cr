@@ -88,4 +88,33 @@ describe MinAudio do
       end
     end
   end
+
+  describe MinAudio::CaptureDevice do
+    # Capture opens real hardware (and needs permission on mobile) — CI
+    # machines have none, so the headless guarantee is only "fails
+    # cleanly, never segfaults". With a microphone present (dev box) the
+    # full open → start → drain → stop cycle runs.
+    it "init fails cleanly without a capture device" do
+      devices = MinAudio::Context.devices[:capture]
+      if devices.empty?
+        expect_raises(MinAudio::Error) do
+          MinAudio::CaptureDevice.new
+        end
+        next
+      end
+      dev = MinAudio::CaptureDevice.new
+      begin
+        dev.sample_rate.should eq(16000)
+        dev.channels.should eq(1)
+        dev.start
+        sleep 150.milliseconds
+        dev.pending.should be >= 0
+        dev.drain.size.should be >= 0
+        dev.stop
+      ensure
+        dev.close
+        dev.closed?.should be_true
+      end
+    end
+  end
 end
