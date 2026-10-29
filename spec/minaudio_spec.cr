@@ -35,7 +35,7 @@ end
 
 describe MinAudio do
   it "exposes the vendored version" do
-    MinAudio::VERSION.should eq("0.1.2")
+    MinAudio::VERSION.should eq("0.2.0")
   end
 
   it "maps ma_result codes" do
@@ -86,6 +86,85 @@ describe MinAudio do
       expect_raises(MinAudio::Error) do
         MinAudio::Decoder.from_memory(Bytes.new(64) { |i| i.to_u8 })
       end
+    end
+  end
+
+  describe MinAudio::AudioBuffer do
+    # Fully decoded PCM (f32) living in memory — the sample-loading half
+    # of 0.2.0: load once, play many times through Engine#sound(buffer).
+    it "decodes a file into PCM" do
+      path = "/tmp/minaudio_spec_ab.wav"
+      File.write(path, sine_wav(4410))
+      begin
+        buf = MinAudio::AudioBuffer.from_file(path)
+        buf.channels.should eq(1)
+        buf.sample_rate.should eq(44100)
+        buf.frames.should eq(4410)
+        buf.close
+        buf.closed?.should be_true
+      ensure
+        File.delete(path)
+      end
+    end
+
+    it "decodes in-memory bytes" do
+      buf = MinAudio::AudioBuffer.from_memory(sine_wav(2205, 2, 22050))
+      buf.channels.should eq(2)
+      buf.sample_rate.should eq(22050)
+      buf.frames.should eq(2205)
+      buf.close
+    end
+
+    it "raises on garbage input" do
+      expect_raises(MinAudio::Error) do
+        MinAudio::AudioBuffer.from_memory(Bytes.new(64) { |i| i.to_u8 })
+      end
+    end
+  end
+
+  describe MinAudio::Capture do
+    # The 0.2.0 ring capture (f32, pull model): open → start → poll
+    # available_frames → read(buf) → stop → close. Same headless contract
+    # as CaptureDevice — without a microphone init fails cleanly.
+    it "init fails cleanly without a capture device" do
+      devices = MinAudio::Context.devices[:capture]
+      if devices.empty?
+        expect_raises(MinAudio::Error) do
+          MinAudio::Capture.new
+        end
+        next
+      end
+      cap = MinAudio::Capture.new(sample_rate: 48_000, channels: 1,
+        ring_frames: 16_384)
+      begin
+        cap.sample_rate.should be > 0
+        cap.channels.should eq(1)
+        cap.start
+        # ALSA & friends can need a few periods before the first frames
+        # land — poll for up to 2s instead of a fixed sleep.
+        deadline = Time.utc + 2.seconds
+        while cap.available_frames == 0 && Time.utc < deadline
+          sleep 50.milliseconds
+        end
+        cap.available_frames.should be > 0
+        buf = Bytes.new(4800 * 1 * 4) # room for 4800 f32 frames
+        n = cap.read(buf)
+        n.should be > 0
+        n.should be <= 4800
+        cap.available_frames.should be < 16_385 # bounded by the ring
+        cap.stop
+      ensure
+        cap.close
+        cap.closed?.should be_true
+      end
+    end
+
+    it "raises on use after close" do
+      devices = MinAudio::Context.devices[:capture]
+      next if devices.empty?
+      cap = MinAudio::Capture.new
+      cap.close
+      expect_raises(MinAudio::Error) { cap.start }
     end
   end
 

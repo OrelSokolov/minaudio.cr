@@ -251,3 +251,259 @@ void minaudio_capture_free(void* p) {
     free(c->buf);
     free(c);
 }
+
+/* ---- Audio buffer helpers (0.2.0) ---------------------------------------
+ * A fully decoded, in-memory PCM buffer (f32 interleaved, native source
+ * channels/rate) wrapped in an ma_audio_buffer — the sample-loading half
+ * of the API: decode a file ONCE, then play it any number of times
+ * through ma_sound_init_from_audio_buffer (no per-playback file I/O or
+ * re-decode). One heap object handed to Crystal as an opaque pointer;
+ * free with minaudio_audio_buffer_free AFTER the last sound using it.
+ */
+typedef struct {
+    ma_audio_buffer ab;
+    float* data; /* owned PCM; ab references it non-owning */
+} minaudio_abuf;
+
+/* Decode everything a decoder still has into an f32 buffer. Chunked read
+ * loop (works even when the frame count is unknown up front). */
+static ma_result minaudio_abuf_decode(ma_decoder* dec, minaudio_abuf** out) {
+    ma_format fmt;
+    ma_uint32 channels = 0, rate = 0;
+    ma_result r = ma_decoder_get_data_format(dec, &fmt, &channels, &rate,
+                                             NULL, 0);
+    if (r != MA_SUCCESS || channels == 0) return r != MA_SUCCESS ? r : MA_INVALID_FILE;
+
+    ma_uint64 total = 0;
+    r = ma_decoder_get_length_in_pcm_frames(dec, &total);
+    if (r != MA_SUCCESS) return r;
+
+    size_t cap = total > 0 ? (size_t)total : 48000;
+    float* data = (float*)malloc(cap * channels * sizeof(float));
+    minaudio_abuf* b = (minaudio_abuf*)malloc(sizeof(minaudio_abuf));
+    if (!data || !b) { free(data); free(b); return MA_OUT_OF_MEMORY; }
+
+    size_t got = 0;
+    for (;;) {
+        if (got == cap) {
+            if (total > 0) break; /* known length: exactly consumed */
+            cap *= 2;             /* unknown length: grow and keep reading */
+            float* nb = (float*)realloc(data, cap * channels * sizeof(float));
+            if (!nb) { free(data); free(b); return MA_OUT_OF_MEMORY; }
+            data = nb;
+        }
+        ma_uint64 n = 0;
+        r = ma_decoder_read_pcm_frames(dec, data + (size_t)got * channels,
+                                       (ma_uint64)(cap - got), &n);
+        if (r != MA_SUCCESS) { free(data); free(b); return r; }
+        if (n == 0) break;
+        got += (size_t)n;
+    }
+    if (got == 0) { free(data); free(b); return MA_INVALID_FILE; }
+
+    /* v0.11.22 API: descriptor config (sampleRate is not an init param). */
+    ma_audio_buffer_config cfg =
+        ma_audio_buffer_config_init(ma_format_f32, channels, (ma_uint64)got,
+                                    data, NULL);
+    cfg.sampleRate = rate;
+    r = ma_audio_buffer_init(&cfg, &b->ab);
+    if (r != MA_SUCCESS) { free(data); free(b); return r; }
+    b->data = data;
+    *out = b;
+    return MA_SUCCESS;
+}
+
+void* minaudio_audio_buffer_new(const void* data, size_t size,
+                                int* out_result) {
+    ma_decoder dec;
+    ma_decoder_config cfg = ma_decoder_config_init(ma_format_f32, 0, 0);
+    ma_result r = ma_decoder_init_memory(data, size, &cfg, &dec);
+    if (r != MA_SUCCESS) { *out_result = r; return NULL; }
+    minaudio_abuf* b = NULL;
+    r = minaudio_abuf_decode(&dec, &b);
+    ma_decoder_uninit(&dec);
+    if (r != MA_SUCCESS) { *out_result = r; return NULL; }
+    *out_result = MA_SUCCESS;
+    return b;
+}
+
+void* minaudio_audio_buffer_new_from_file(const char* path, int* out_result) {
+    ma_decoder dec;
+    ma_decoder_config cfg = ma_decoder_config_init(ma_format_f32, 0, 0);
+    ma_result r = ma_decoder_init_file(path, &cfg, &dec);
+    if (r != MA_SUCCESS) { *out_result = r; return NULL; }
+    minaudio_abuf* b = NULL;
+    r = minaudio_abuf_decode(&dec, &b);
+    ma_decoder_uninit(&dec);
+    if (r != MA_SUCCESS) { *out_result = r; return NULL; }
+    *out_result = MA_SUCCESS;
+    return b;
+}
+
+ma_uint32 minaudio_audio_buffer_channels(void* p) {
+    minaudio_abuf* b = (minaudio_abuf*)p;
+    return b ? b->ab.ref.channels : 0;
+}
+
+ma_uint32 minaudio_audio_buffer_rate(void* p) {
+    minaudio_abuf* b = (minaudio_abuf*)p;
+    return b ? b->ab.ref.sampleRate : 0;
+}
+
+ma_uint64 minaudio_audio_buffer_frames(void* p) {
+    minaudio_abuf* b = (minaudio_abuf*)p;
+    return b ? b->ab.ref.sizeInFrames : 0;
+}
+
+void minaudio_audio_buffer_free(void* p) {
+    minaudio_abuf* b = (minaudio_abuf*)p;
+    if (!b) return;
+    ma_audio_buffer_uninit(&b->ab); /* no-op for non-owning data */
+    free(b->data);
+    free(b);
+}
+
+/* ---- Ring capture helpers (0.2.0) ---------------------------------------
+ * The pull-model capture (MinAudio::Capture): the device runs with a data
+ * callback appending f32 frames to a FIXED-SIZE ring of `ring_frames`
+ * frames — it never grows unbounded: when the app reads slower than the
+ * mic delivers, incoming frames that no longer fit are dropped (the
+ * buffered timeline keeps its order). The read below never blocks — call
+ * it from the UI frame loop. Stop every sound using the buffer data
+ * before minaudio_ring_free (the callback thread stops with the device).
+ */
+typedef struct {
+    ma_device dev;
+    ma_context* ctx;   /* backend-pinned context (NULL = device-internal) */
+    ma_mutex lock;     /* guards buf/len_frames */
+    float* buf;        /* interleaved f32, cap_frames * channels */
+    size_t cap_frames; /* ring capacity in frames */
+    size_t len_frames; /* frames buffered right now */
+    ma_uint32 sample_rate, channels;
+} minaudio_ring;
+
+static void minaudio_ring_cb(ma_device* pDevice, void* pOutput,
+                             const void* pInput, ma_uint32 frameCount) {
+    (void)pOutput;
+    minaudio_ring* c = (minaudio_ring*)pDevice->pUserData;
+    if (!c || !pInput || frameCount == 0) return;
+    size_t n = (size_t)frameCount;
+    size_t fit;
+    ma_mutex_lock(&c->lock);
+    fit = c->cap_frames - c->len_frames;
+    if (n < fit) fit = n;
+    if (fit > 0) {
+        memcpy(c->buf + c->len_frames * c->channels, pInput,
+               fit * c->channels * sizeof(float));
+        c->len_frames += fit;
+    } /* the rest is dropped — the ring is full (slow reader) */
+    ma_mutex_unlock(&c->lock);
+}
+
+/* backends NULL/count 0 = miniaudio's default priority order. *out_result
+ * gets the ma_result. Init leaves the device STOPPED — call
+ * minaudio_ring_start explicitly.
+ */
+void* minaudio_ring_new(int rate, int channels, int ring_frames,
+                        const int* backends, int count, int* out_result) {
+    if (ring_frames <= 0 || channels <= 0) {
+        *out_result = MA_INVALID_ARGS;
+        return NULL;
+    }
+    minaudio_ring* c = (minaudio_ring*)calloc(1, sizeof(minaudio_ring));
+    if (!c) { *out_result = MA_OUT_OF_MEMORY; return NULL; }
+    c->buf = (float*)malloc((size_t)ring_frames * channels * sizeof(float));
+    if (!c->buf) { free(c); *out_result = MA_OUT_OF_MEMORY; return NULL; }
+    c->cap_frames = (size_t)ring_frames;
+    ma_mutex_init(&c->lock);
+
+    ma_device_config cfg = ma_device_config_init(ma_device_type_capture);
+    cfg.sampleRate = (ma_uint32)rate;
+    cfg.capture.format = ma_format_f32;
+    cfg.capture.channels = (ma_uint32)channels;
+    cfg.capture.shareMode = ma_share_mode_shared;
+    cfg.dataCallback = minaudio_ring_cb;
+    cfg.pUserData = c;
+
+    ma_result r;
+    if (backends && count > 0) {
+        r = minaudio_context_create(backends, count, &c->ctx);
+        if (r == MA_SUCCESS)
+            r = ma_device_init(c->ctx, &cfg, &c->dev);
+    } else {
+        r = ma_device_init(NULL, &cfg, &c->dev);
+    }
+    if (r != MA_SUCCESS) {
+        if (c->ctx) minaudio_context_free(c->ctx);
+        ma_mutex_uninit(&c->lock);
+        free(c->buf);
+        free(c);
+        *out_result = r;
+        return NULL;
+    }
+    /* The data converter guarantees the configured format/channels/rate
+     * in the callback; report what the device actually settled on. */
+    c->sample_rate = c->dev.sampleRate > 0 ? c->dev.sampleRate : (ma_uint32)rate;
+    c->channels = c->dev.capture.channels > 0 ? c->dev.capture.channels
+                                              : (ma_uint32)channels;
+    *out_result = MA_SUCCESS;
+    return c;
+}
+
+int minaudio_ring_start(void* p) {
+    minaudio_ring* c = (minaudio_ring*)p;
+    return c ? ma_device_start(&c->dev) : MA_INVALID_ARGS;
+}
+
+int minaudio_ring_stop(void* p) {
+    minaudio_ring* c = (minaudio_ring*)p;
+    return c ? ma_device_stop(&c->dev) : MA_INVALID_ARGS;
+}
+
+/* Copy out (and drop) up to max_frames frames into `out` (interleaved
+ * f32); returns the frame count actually read — 0 means nothing new.
+ * Never blocks. */
+ma_uint64 minaudio_ring_read(void* p, float* out, ma_uint64 max_frames) {
+    minaudio_ring* c = (minaudio_ring*)p;
+    if (!c || !out) return 0;
+    ma_mutex_lock(&c->lock);
+    ma_uint64 n = c->len_frames < max_frames ? c->len_frames : max_frames;
+    if (n > 0) {
+        memcpy(out, c->buf, (size_t)n * c->channels * sizeof(float));
+        memmove(c->buf, c->buf + n * c->channels,
+                (c->len_frames - n) * c->channels * sizeof(float));
+        c->len_frames -= n;
+    }
+    ma_mutex_unlock(&c->lock);
+    return n;
+}
+
+/* Frames waiting right now (meters/tests; never blocks). */
+ma_uint64 minaudio_ring_available(void* p) {
+    minaudio_ring* c = (minaudio_ring*)p;
+    if (!c) return 0;
+    ma_mutex_lock(&c->lock);
+    ma_uint64 n = c->len_frames;
+    ma_mutex_unlock(&c->lock);
+    return n;
+}
+
+int minaudio_ring_rate(void* p) {
+    minaudio_ring* c = (minaudio_ring*)p;
+    return c ? (int)c->sample_rate : 0;
+}
+
+int minaudio_ring_channels(void* p) {
+    minaudio_ring* c = (minaudio_ring*)p;
+    return c ? (int)c->channels : 0;
+}
+
+void minaudio_ring_free(void* p) {
+    minaudio_ring* c = (minaudio_ring*)p;
+    if (!c) return;
+    ma_device_uninit(&c->dev); /* stops the device if still running */
+    if (c->ctx) minaudio_context_free(c->ctx); /* AFTER device uninit */
+    ma_mutex_uninit(&c->lock);
+    free(c->buf);
+    free(c);
+}

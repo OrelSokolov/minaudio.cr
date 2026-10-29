@@ -81,6 +81,42 @@ lib LibMinAudio
   fun capture_channels = minaudio_capture_channels(cap : Void*) : Int32
   fun capture_free = minaudio_capture_free(cap : Void*) : Void
 
+  # ---- ext audio-buffer helpers (0.2.0) --------------------------------
+  # Fully decoded in-memory PCM (f32 interleaved) wrapped in an
+  # ma_audio_buffer: decode once with audio_buffer_new / _new_from_file,
+  # play any number of sounds off it (see sound_init_from_audio_buffer
+  # below), free with audio_buffer_free AFTER the last such sound.
+  fun audio_buffer_new = minaudio_audio_buffer_new(
+    data : Void*, size : SizeT, out_result : Int32*
+  ) : Void*
+  fun audio_buffer_new_from_file = minaudio_audio_buffer_new_from_file(
+    path : UInt8*, out_result : Int32*
+  ) : Void*
+  fun audio_buffer_channels = minaudio_audio_buffer_channels(buf : Void*) : UInt32
+  fun audio_buffer_rate = minaudio_audio_buffer_rate(buf : Void*) : UInt32
+  fun audio_buffer_frames = minaudio_audio_buffer_frames(buf : Void*) : UInt64
+  fun audio_buffer_free = minaudio_audio_buffer_free(buf : Void*) : Void
+
+  # ---- ext ring-capture helpers (0.2.0) --------------------------------
+  # Opaque per-device capture state over a FIXED ring of `ring_frames`
+  # f32 frames: the data callback appends, the read side never blocks,
+  # overflow drops the incoming frames (never grows unbounded). Init
+  # leaves the device STOPPED — call ring_start explicitly. Free with
+  # ring_free.
+  fun ring_new = minaudio_ring_new(
+    rate : Int32, channels : Int32, ring_frames : Int32,
+    backends : Int32*, backend_count : Int32, out_result : Int32*
+  ) : Void*
+  fun ring_start = minaudio_ring_start(cap : Void*) : Int32
+  fun ring_stop = minaudio_ring_stop(cap : Void*) : Int32
+  fun ring_read = minaudio_ring_read(
+    cap : Void*, out : Float32*, max_frames : UInt64
+  ) : UInt64
+  fun ring_available = minaudio_ring_available(cap : Void*) : UInt64
+  fun ring_rate = minaudio_ring_rate(cap : Void*) : Int32
+  fun ring_channels = minaudio_ring_channels(cap : Void*) : Int32
+  fun ring_free = minaudio_ring_free(cap : Void*) : Void
+
   # ma_backend enum (priority order; see the header's "Backend enums
   # must be in priority order" block).
   BACKEND_WASAPI     =  0
@@ -118,6 +154,14 @@ lib LibMinAudio
   ) : Int32
   fun sound_init_copy = ma_sound_init_copy(
     engine : Void*, existing : Void*, flags : UInt32, group : Void*,
+    sound : Void*
+  ) : Int32
+  # Sound over a decoded AudioBuffer (in-memory PCM, no file I/O). The
+  # buffer must outlive the sound — the Crystal Sound keeps a reference.
+  # ma_audio_buffer is a data source (ref.ds is its first member), so it
+  # feeds ma_sound_init_from_data_source directly.
+  fun sound_init_from_data_source = ma_sound_init_from_data_source(
+    engine : Void*, data_source : Void*, flags : UInt32, group : Void*,
     sound : Void*
   ) : Int32
   fun sound_uninit = ma_sound_uninit(sound : Void*) : Void

@@ -11,10 +11,12 @@ The C library is vendored (`vendor/miniaudio.h`, v0.11.22, public domain
 |---|---|
 | Playback engine | `MinAudio::Engine` — default device, master volume, pause/resume, fire-and-forget `#play_file` |
 | Sounds | `MinAudio::Sound` — start/stop (+fade), volume, pan, pitch, loop, seek/cursor/length, fades, 3D position |
+| Audio buffers | `MinAudio::AudioBuffer` — decode once into in-memory f32 PCM, play any number of sounds off it (`Engine#sound(buffer)`) |
 | Groups | `MinAudio::SoundGroup` — volume/stop buses |
 | Decoding | `MinAudio::Decoder` — headless WAV/MP3/FLAC → Float32 PCM from file or memory, with optional resample/mix-down |
 | Devices | `MinAudio::Context` — playback/capture enumeration (names + opaque ids) |
-| Capture | `MinAudio::CaptureDevice` — microphone recording to s16le PCM, non-blocking `#drain` (callback + locked buffer in ext/miniaudio.c) |
+| Capture | `MinAudio::Capture` — pull-model ring capture (f32, bounded `ring_frames`), non-blocking `#read`/`#available_frames` |
+| Capture (legacy) | `MinAudio::CaptureDevice` — 0.1.x s16le capture with unbounded `#drain` |
 | Errors | `MinAudio::Error` carrying a `MinAudio::Result` code (full ma_result table) |
 
 Not wrapped (yet): raw custom `ma_device` playback callbacks, the
@@ -52,22 +54,33 @@ dec.channels       # => 2
 pcm = dec.read_all # => Bytes, interleaved Float32
 ```
 
+Samples: decode once, replay cheap (also headless — decode only):
+
+```crystal
+buf = MinAudio::AudioBuffer.from_file("click.wav") # or from_memory(bytes)
+click = engine.sound(buf)   # prepared; start / loop / volume like any Sound
+buf.close                   # after the last sound using it is done
+```
+
 Device enumeration:
 
 ```crystal
 MinAudio::Context.names.each { |n| puts n }       # playback devices
 ```
 
-Microphone capture (permission — RECORD_AUDIO on Android, TCC on macOS —
-is the application's job; without it init fails cleanly):
+Microphone capture (pull model; permission — RECORD_AUDIO on Android,
+TCC on macOS — is the application's job; without it init fails cleanly):
 
 ```crystal
-mic = MinAudio::CaptureDevice.new                  # default mic, 16 kHz mono s16
+mic = MinAudio::Capture.new                 # 48 kHz mono f32, 16k-frame ring
 mic.start
-chunk = mic.drain                                  # Bytes of NEW PCM, never blocks
+n = mic.available_frames                    # UInt64 frames waiting
+buf = Bytes.new(4800 * 1 * 4)               # room for 4800 f32 frames
+n = mic.read(buf)                           # frames read, never blocks
 mic.stop
 mic.close
-# a specific microphone: Context.devices[:capture][i].id → CaptureDevice.new(id)
+# the ring never grows: incoming frames that no longer fit are dropped
+# (0.1.x CaptureDevice — s16 + unbounded #drain — is still available)
 ```
 
 ## Integrating into an app
@@ -136,8 +149,9 @@ AudioToolbox / CoreFoundation frameworks (the darwin branch of lib.cr's
 vendor/miniaudio.h   vendored miniaudio (v0.11.22)
 ext/miniaudio.c      MINIAUDIO_IMPLEMENTATION + sizeof/config helpers
 src/minaudio/lib.cr  raw FFI bindings (all structs opaque)
-src/minaudio/*.cr    Engine, Sound, SoundGroup, Decoder, Context, Result
-spec/                headless specs (decoder round-trips)
+src/minaudio/*.cr    Engine, Sound, SoundGroup, AudioBuffer, Decoder, Context, Capture, Result
+spec/                headless specs (decoder/buffer round-trips; capture
+                     cycle runs when a microphone exists)
 ```
 
 ## License

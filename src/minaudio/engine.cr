@@ -111,6 +111,15 @@ module MinAudio
         .tap { |s| track(s) }
     end
 
+    # Prepare a sound from a decoded in-memory AudioBuffer (see
+    # AudioBuffer) without starting it. The buffer must outlive the
+    # sound — the Sound keeps it referenced, and Engine#close closes
+    # tracked sounds before the buffer is expected to go.
+    def sound(buffer : AudioBuffer, *, group : SoundGroup? = nil) : Sound
+      ensure_open
+      Sound.new(self, buffer, group: group).tap { |s| track(s) }
+    end
+
     # Prepare and immediately start a sound. `loop` keeps it looping.
     def play(path : String, *, volume : Float32? = nil, loop : Bool = false,
              stream : Bool = false, group : SoundGroup? = nil) : Sound

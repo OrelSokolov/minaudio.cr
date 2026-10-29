@@ -17,6 +17,10 @@ module MinAudio
     @buf : Bytes
     @closed : Bool = false
 
+    # Set for sounds created from an AudioBuffer: keeps the decoded PCM
+    # alive (the ma_sound reads it directly) as long as this sound exists.
+    @buffer : AudioBuffer?
+
     # Internal: allocate + ma_sound_init_from_file. Raises MinAudio::Error
     # when the file cannot be opened or decoded.
     def initialize(@engine : Engine, path : String, *,
@@ -32,6 +36,20 @@ module MinAudio
           group.try(&.to_unsafe) || Pointer(Void).null,
           fence, @buf),
         "init sound #{path.inspect}")
+    end
+
+    # Internal: sound over a decoded in-memory AudioBuffer (no file I/O,
+    # no re-decode — every sound shares the buffer's PCM). The buffer
+    # must outlive this sound; it is kept referenced via @buffer.
+    def initialize(@engine : Engine, buffer : AudioBuffer, *,
+                   group : SoundGroup? = nil)
+      @buffer = buffer
+      @buf = Bytes.new(LibMinAudio.sizeof_sound)
+      MinAudio.check(
+        LibMinAudio.sound_init_from_data_source(
+          engine.to_unsafe, buffer.to_unsafe, 0,
+          group.try(&.to_unsafe) || Pointer(Void).null, @buf),
+        "init sound from buffer")
     end
 
     # Internal: copy of an existing sound (shares the underlying data).
