@@ -507,3 +507,189 @@ void minaudio_ring_free(void* p) {
     free(c->buf);
     free(c);
 }
+
+/* ---- Ring playback helpers (video-player sync path) ---------------------
+ * The playback mirror of the ring capture: an ma_device in PLAYBACK mode
+ * whose data callback PULLS interleaved f32 frames from a fixed ring the
+ * app thread fills ahead of time. The audio-thread callback never enters
+ * Crystal — it only touches this C object.
+ *
+ *   minaudio_pring_new(rate, ch, ring_frames)   stopped; start explicitly
+ *   minaudio_pring_write(p, src, frames)        app side, non-blocking,
+ *                                              returns frames accepted
+ *   minaudio_pring_consumed(p)                  frames the callback has
+ *                                              output INCLUDING silence
+ *                                              played on underrun — the
+ *                                              A/V master clock source
+ *   minaudio_pring_buffered(p) / _free_space(p) ring fill state
+ *   minaudio_pring_clear(p)                     drop buffered frames (seek)
+ *
+ * Underruns output silence and still bump `consumed`: the device timeline
+ * never stalls, so a clock derived from consumed stays contiguous and the
+ * feeder simply drops frames that became stale.
+ */
+typedef struct {
+    ma_device dev;
+    ma_context* ctx;   /* backend-pinned context (NULL = device-internal) */
+    ma_mutex lock;     /* guards buf/len_frames/consumed */
+    float* buf;        /* interleaved f32, cap_frames * channels */
+    size_t cap_frames; /* ring capacity in frames */
+    size_t len_frames; /* frames buffered right now */
+    ma_uint64 consumed; /* frames output by the callback (silence incl.) */
+    ma_uint32 sample_rate, channels;
+} minaudio_pring;
+
+static void minaudio_pring_cb(ma_device* pDevice, void* pOutput,
+                              const void* pInput, ma_uint32 frameCount) {
+    (void)pInput;
+    minaudio_pring* c = (minaudio_pring*)pDevice->pUserData;
+    if (!c || !pOutput || frameCount == 0) return;
+    ma_mutex_lock(&c->lock);
+    size_t n = c->len_frames < (size_t)frameCount ? c->len_frames
+                                                  : (size_t)frameCount;
+    if (n > 0) {
+        memcpy(pOutput, c->buf, n * c->channels * sizeof(float));
+        memmove(c->buf, c->buf + n * c->channels,
+                (c->len_frames - n) * c->channels * sizeof(float));
+        c->len_frames -= n;
+    }
+    if (n < frameCount) /* underrun: silence, timeline keeps running */
+        memset((unsigned char*)pOutput + n * c->channels * sizeof(float), 0,
+               (size_t)(frameCount - n) * c->channels * sizeof(float));
+    c->consumed += frameCount;
+    ma_mutex_unlock(&c->lock);
+}
+
+/* backends NULL/count 0 = miniaudio's default priority order. *out_result
+ * gets the ma_result. Init leaves the device STOPPED — call
+ * minaudio_pring_start explicitly. */
+void* minaudio_pring_new(int rate, int channels, int ring_frames,
+                         const int* backends, int count, int* out_result) {
+    if (ring_frames <= 0 || channels <= 0 || rate <= 0) {
+        *out_result = MA_INVALID_ARGS;
+        return NULL;
+    }
+    minaudio_pring* c = (minaudio_pring*)calloc(1, sizeof(minaudio_pring));
+    if (!c) { *out_result = MA_OUT_OF_MEMORY; return NULL; }
+    c->buf = (float*)malloc((size_t)ring_frames * channels * sizeof(float));
+    if (!c->buf) { free(c); *out_result = MA_OUT_OF_MEMORY; return NULL; }
+    c->cap_frames = (size_t)ring_frames;
+    ma_mutex_init(&c->lock);
+
+    ma_device_config cfg = ma_device_config_init(ma_device_type_playback);
+    cfg.sampleRate = (ma_uint32)rate;
+    cfg.playback.format = ma_format_f32;
+    cfg.playback.channels = (ma_uint32)channels;
+    cfg.playback.shareMode = ma_share_mode_shared;
+    cfg.dataCallback = minaudio_pring_cb;
+    cfg.pUserData = c;
+
+    ma_result r;
+    if (backends && count > 0) {
+        r = minaudio_context_create(backends, count, &c->ctx);
+        if (r == MA_SUCCESS)
+            r = ma_device_init(c->ctx, &cfg, &c->dev);
+    } else {
+        r = ma_device_init(NULL, &cfg, &c->dev);
+    }
+    if (r != MA_SUCCESS) {
+        if (c->ctx) minaudio_context_free(c->ctx);
+        ma_mutex_uninit(&c->lock);
+        free(c->buf);
+        free(c);
+        *out_result = r;
+        return NULL;
+    }
+    /* The data converter guarantees the configured format/channels/rate
+     * in the callback; report what the device actually settled on. */
+    c->sample_rate = c->dev.sampleRate > 0 ? c->dev.sampleRate : (ma_uint32)rate;
+    c->channels = c->dev.playback.channels > 0 ? c->dev.playback.channels
+                                               : (ma_uint32)channels;
+    *out_result = MA_SUCCESS;
+    return c;
+}
+
+int minaudio_pring_start(void* p) {
+    minaudio_pring* c = (minaudio_pring*)p;
+    return c ? ma_device_start(&c->dev) : MA_INVALID_ARGS;
+}
+
+/* Device master volume (0..1) — the player bar's volume slider. */
+int minaudio_pring_set_volume(void* p, float v) {
+    minaudio_pring* c = (minaudio_pring*)p;
+    return c ? ma_device_set_master_volume(&c->dev, v) : MA_INVALID_ARGS;
+}
+
+int minaudio_pring_stop(void* p) {
+    minaudio_pring* c = (minaudio_pring*)p;
+    return c ? ma_device_stop(&c->dev) : MA_INVALID_ARGS;
+}
+
+/* Append up to `frames` interleaved-f32 frames from `src`; returns the
+ * count actually accepted (the ring may be nearly full — the caller keeps
+ * the remainder and retries). Never blocks. */
+ma_uint64 minaudio_pring_write(void* p, const float* src, ma_uint64 frames) {
+    minaudio_pring* c = (minaudio_pring*)p;
+    if (!c || !src) return 0;
+    ma_mutex_lock(&c->lock);
+    size_t fit = c->cap_frames - c->len_frames;
+    if (fit > frames) fit = (size_t)frames;
+    if (fit > 0) {
+        memcpy(c->buf + c->len_frames * c->channels, src,
+               fit * c->channels * sizeof(float));
+        c->len_frames += fit;
+    }
+    ma_mutex_unlock(&c->lock);
+    return fit;
+}
+
+/* Drop everything buffered (seek re-positioning). Timeline counters keep
+ * running — consumed keeps counting whatever the callback plays next. */
+void minaudio_pring_clear(void* p) {
+    minaudio_pring* c = (minaudio_pring*)p;
+    if (!c) return;
+    ma_mutex_lock(&c->lock);
+    c->len_frames = 0;
+    ma_mutex_unlock(&c->lock);
+}
+
+/* Frames output by the callback so far, INCLUDING underrun silence — the
+ * device-accurate A/V clock source. */
+ma_uint64 minaudio_pring_consumed(void* p) {
+    minaudio_pring* c = (minaudio_pring*)p;
+    if (!c) return 0;
+    ma_mutex_lock(&c->lock);
+    ma_uint64 n = c->consumed;
+    ma_mutex_unlock(&c->lock);
+    return n;
+}
+
+/* Frames sitting in the ring right now (feed pacing). */
+ma_uint64 minaudio_pring_buffered(void* p) {
+    minaudio_pring* c = (minaudio_pring*)p;
+    if (!c) return 0;
+    ma_mutex_lock(&c->lock);
+    ma_uint64 n = c->len_frames;
+    ma_mutex_unlock(&c->lock);
+    return n;
+}
+
+int minaudio_pring_rate(void* p) {
+    minaudio_pring* c = (minaudio_pring*)p;
+    return c ? (int)c->sample_rate : 0;
+}
+
+int minaudio_pring_channels(void* p) {
+    minaudio_pring* c = (minaudio_pring*)p;
+    return c ? (int)c->channels : 0;
+}
+
+void minaudio_pring_free(void* p) {
+    minaudio_pring* c = (minaudio_pring*)p;
+    if (!c) return;
+    ma_device_uninit(&c->dev); /* stops the device if still running */
+    if (c->ctx) minaudio_context_free(c->ctx); /* AFTER device uninit */
+    ma_mutex_uninit(&c->lock);
+    free(c->buf);
+    free(c);
+}

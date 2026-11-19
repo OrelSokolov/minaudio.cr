@@ -117,6 +117,30 @@ lib LibMinAudio
   fun ring_channels = minaudio_ring_channels(cap : Void*) : Int32
   fun ring_free = minaudio_ring_free(cap : Void*) : Void
 
+  # ---- ext ring-playback helpers --------------------------------------
+  # The playback mirror of the ring capture: an ma_device in playback mode
+  # whose data callback pulls interleaved f32 frames from a fixed ring the
+  # app thread fills ahead of time (the A/V sync path of a video player:
+  # consumed — INCLUDING underrun silence — is the master clock source).
+  # Init leaves the device STOPPED — call pring_start explicitly. Free with
+  # pring_free.
+  fun pring_new = minaudio_pring_new(
+    rate : Int32, channels : Int32, ring_frames : Int32,
+    backends : Int32*, backend_count : Int32, out_result : Int32*
+  ) : Void*
+  fun pring_start = minaudio_pring_start(cap : Void*) : Int32
+  fun pring_set_volume = minaudio_pring_set_volume(cap : Void*, volume : Float32) : Int32
+  fun pring_stop = minaudio_pring_stop(cap : Void*) : Int32
+  fun pring_write = minaudio_pring_write(
+    cap : Void*, src : Float32*, frames : UInt64
+  ) : UInt64
+  fun pring_clear = minaudio_pring_clear(cap : Void*) : Void
+  fun pring_consumed = minaudio_pring_consumed(cap : Void*) : UInt64
+  fun pring_buffered = minaudio_pring_buffered(cap : Void*) : UInt64
+  fun pring_rate = minaudio_pring_rate(cap : Void*) : Int32
+  fun pring_channels = minaudio_pring_channels(cap : Void*) : Int32
+  fun pring_free = minaudio_pring_free(cap : Void*) : Void
+
   # ma_backend enum (priority order; see the header's "Backend enums
   # must be in priority order" block).
   BACKEND_WASAPI     =  0
