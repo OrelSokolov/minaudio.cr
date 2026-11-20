@@ -5,7 +5,7 @@
 # helpers. Value-struct returns (configs) are avoided via the f32 decoder
 # helpers. Signatures below were checked against the vendored header.
 
-@[Link("minaudio")]
+@[Link("miniaudio")]
 {% if flag?(:darwin) %}
   # miniaudio's CoreAudio backend (link order: the archive resolves these).
   @[Link(framework: "CoreAudio")]
